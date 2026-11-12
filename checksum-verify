@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Verify the bytes of one regular file against one expected SHA-256 checksum.
+
+Single input mode:  checksum-verify <file> <expected-sha256>
+Single output mode:  one line on standard output, `OK <file>` or `FAIL <file>`.
+"""
+
+import hashlib
+import os
+import stat
+import sys
+
+HELP_TEXT = """Usage: checksum-verify <file> <expected-sha256>
+
+Verify the bytes of one regular file against one expected checksum.
+
+  <file>              Path to a single regular file to verify.
+  <expected-sha256>   Expected SHA-256 checksum of the file's raw bytes,
+                      encoded as exactly 64 hexadecimal characters
+                      ([0-9a-fA-F]{64}). Uppercase and lowercase hex are
+                      both accepted and compared case-insensitively.
+
+Single input mode: exactly two positional arguments, no standard-input
+mode, no manifest mode, and no flag-based input alternatives.
+
+Single output mode: on a completed verification the tool prints exactly
+one line to standard output and nothing to standard error:
+
+  OK <file>     verification performed and the checksum matched
+  FAIL <file>   verification performed and the checksum did not match
+
+Exit codes:
+
+  0  verification performed and the checksum matched, or help requested
+  1  verification performed and the checksum did not match
+  2  no verification performed because of a usage or environment error
+     (wrong argument count, invalid checksum format, file missing, not a
+     regular file, unreadable file, or an I/O failure while reading)
+
+Examples:
+
+  checksum-verify document.bin e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  # match -> prints: OK document.bin, exits 0
+
+  checksum-verify document.bin 0000000000000000000000000000000000000000000000000000000000000000
+  # mismatch -> prints: FAIL document.bin, exits 1
+"""
+
+CHUNK_SIZE = 65536
+
+
+def _stderr(message):
+    sys.stderr.write(message + "\n")
+
+
+def _is_hex64(value):
+    if len(value) != 64:
+        return False
+    for ch in value:
+        if ch not in "0123456789abcdefABCDEF":
+            return False
+    return True
+
+
+def _classify_path(path):
+    """Return None when the path is verifiable, else (category, message).
+
+    Follows the R13 precedence after checksum-shape validation:
+    `file not found`, then `not a file`, then `unreadable`/`cannot read`.
+    Symlinks are resolved and classified by their target.
+    """
+    if os.path.islink(path):
+        if not os.path.exists(path):
+            return ("file not found",
+                    "checksum-verify: file not found: %s" % path)
+        if not os.path.isfile(path):
+            return ("not a file",
+                    "checksum-verify: not a file: %s" % path)
+    else:
+        if not os.path.lexists(path):
+            return ("file not found",
+                    "checksum-verify: file not found: %s" % path)
+        if not os.path.isfile(path):
+            return ("not a file",
+                    "checksum-verify: not a file: %s" % path)
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return ("unreadable",
+                "checksum-verify: unreadable: cannot read %s" % path)
+    if not stat.S_ISREG(mode):
+        return ("not a file",
+                "checksum-verify: not a file: %s" % path)
+    if (mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)) == 0:
+        return ("unreadable",
+                "checksum-verify: unreadable: cannot read %s" % path)
+    return None
+
+
+def main(argv):
+    if "--help" in argv or "-h" in argv:
+        sys.stdout.write(HELP_TEXT)
+        return 0
+    if len(argv) != 3:
+        _stderr("checksum-verify: usage: "
+                "checksum-verify <file> <expected-sha256>")
+        return 2
+    path = argv[1]
+    expected = argv[2]
+    if not _is_hex64(expected):
+        _stderr("checksum-verify: invalid checksum: "
+                "expected exactly 64 hexadecimal characters")
+        return 2
+    failure = _classify_path(path)
+    if failure is not None:
+        _category, message = failure
+        _stderr(message)
+        return 2
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        _stderr("checksum-verify: unreadable: cannot read %s" % path)
+        return 2
+    if digest.hexdigest().lower() == expected.lower():
+        sys.stdout.write("OK %s\n" % path)
+        return 0
+    sys.stdout.write("FAIL %s\n" % path)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
